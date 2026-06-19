@@ -3,7 +3,7 @@
   "build": { "builder": "NIXPACKS" },
   "deploy": {
     "startCommand": "python sync.py --daily",
-    "cronSchedule": "27 14 * * *",
+    "cronSchedule": "0 9 * * *",
     "restartPolicyType": "NEVER"
   }
 }
