@@ -1,0 +1,26 @@
+name: beehiiv sync
+
+# Once a day: full posts + content + a stats snapshot, then subscribers + tiers
+# + a publication-level snapshot. cron is UTC — 09:00 UTC ≈ 04:00–05:00 ET.
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch: {}     # manual "Run workflow" button, same job
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Run daily sync
+        env:
+          BEEHIIV_API_KEY: ${{ secrets.BEEHIIV_API_KEY }}
+          BEEHIIV_PUBLICATION_ID: ${{ secrets.BEEHIIV_PUBLICATION_ID }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python sync.py                          # posts: metadata + content + stats snapshot
+          python sync.py --subscribers --snapshot # subscribers + tiers + publication snapshot
