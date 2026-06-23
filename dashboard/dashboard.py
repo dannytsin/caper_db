@@ -202,10 +202,11 @@ with t4:
                     use_container_width=True)
     st.dataframe(contrib, use_container_width=True, hide_index=True)
 
-# ---- 5. Open rate by author (filterable) ---------------------------------
+# ---- 5. By author: summary + per-post explorer ---------------------------
 with t5:
     st.subheader("Open rate & conversions by author")
-    st.caption("Avg open rate split by paid vs unpaid email, plus conversions from the unpaid email.")
+    st.caption("Avg open rate split by paid vs unpaid email. unpaid_conversions are May 13+ "
+               "(when the unpaid tag began).")
     by_author = q("""
         with pf as (
             select p.id post_id,
@@ -228,6 +229,51 @@ with t5:
         having count(distinct p.id) > 0
         order by posts desc
     """)
-    pick = st.selectbox("Filter author", ["All authors"] + by_author["author"].tolist())
-    view = by_author if pick == "All authors" else by_author[by_author["author"] == pick]
-    st.dataframe(view, use_container_width=True, hide_index=True)
+    st.dataframe(by_author, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Explore posts & conversions")
+    detail = q("""
+        select p.publish_date::date as date, p.title,
+               string_agg(distinct a.name, ', ') as authors,
+               case when bool_or(pt.tag_slug='unpaidemail') then 'unpaid'
+                    when bool_or(pt.tag_slug='paidemail') then 'paid' else '—' end as flag,
+               ps.email_recipients as recipients, ps.open_rate,
+               coalesce(ps.upgrades,0) as conversions
+        from posts p
+        left join post_authors pa on pa.post_id = p.id
+        left join authors a on a.id = pa.author_id
+        left join post_tags pt on pt.post_id = p.id and pt.tag_slug in ('paidemail','unpaidemail')
+        left join post_stats_latest ps on ps.post_id = p.id
+        where p.status in ('confirmed','published')
+        group by p.id, p.publish_date, p.title, ps.email_recipients, ps.open_rate, ps.upgrades
+        order by date desc
+    """)
+    detail["date"] = pd.to_datetime(detail["date"])
+    all_authors = sorted({a for row in detail["authors"].dropna() for a in row.split(", ")})
+
+    cc1, cc2 = st.columns([2, 1])
+    scope = cc1.selectbox("Author", ["All authors", "Contributors (excl. regulars)"] + all_authors)
+    unpaid_only = cc2.checkbox("Unpaid email only (May 13+)")
+
+    sub = detail.copy()
+    if scope == "Contributors (excl. regulars)":
+        sub = sub[~sub["authors"].fillna("").apply(lambda s: any(r in s for r in REGULARS))]
+    elif scope != "All authors":
+        sub = sub[sub["authors"].fillna("").str.contains(scope, regex=False)]
+    if unpaid_only:
+        sub = sub[sub["flag"] == "unpaid"]
+
+    weekly = (sub.dropna(subset=["date"]).set_index("date")
+              .resample("W")["conversions"].sum().reset_index())
+    st.caption("Conversions by week (sends are ~weekly)")
+    st.altair_chart(
+        alt.Chart(weekly).mark_bar(color=RED).encode(
+            x=alt.X("date:T", title=None),
+            y=alt.Y("conversions:Q", title="conversions / week"),
+            tooltip=["date", "conversions"]).properties(height=260),
+        use_container_width=True,
+    )
+    disp = sub.copy()
+    disp["date"] = disp["date"].dt.date
+    st.dataframe(disp, use_container_width=True, hide_index=True)
