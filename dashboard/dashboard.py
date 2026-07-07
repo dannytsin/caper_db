@@ -19,6 +19,7 @@ st.set_page_config(page_title="Caper Dashboard", page_icon="📰", layout="wide"
 
 RED = "#c0392b"
 REGULARS = ("Annie Armstrong", "Emma Orlow", "Chris Crowley")  # exclude from contributor view
+REG_ORDER = ["Emma Orlow", "Chris Crowley", "Annie Armstrong"]  # display order for the Regulars tab
 
 
 @st.cache_resource
@@ -55,6 +56,72 @@ def hbar(df, cat, val):
         y=alt.Y(f"{cat}:N", sort="-x", title=None),
         tooltip=list(df.columns),
     ).properties(height=min(26 * len(df) + 30, 560))
+
+
+# ---- Regulars tab helpers ------------------------------------------------
+def _pct(v):
+    return "—" if v is None or pd.isna(v) else f"{v:.1f}%"
+
+
+def _windows(df, flag):
+    """Open-rate summary for one email flag: last send + trailing 7/30-day averages.
+    Windows are trailing calendar days from now; the last send is the anchor."""
+    now = pd.Timestamp.now(tz="UTC")
+    sub = (df[(df["flag"] == flag) & (df["recipients"].fillna(0) > 0)]
+           .dropna(subset=["open_rate"]).sort_values("publish_date"))
+    if sub.empty:
+        return None
+    last = sub.iloc[-1]
+    w7 = sub[sub["publish_date"] >= now - pd.Timedelta(days=7)]["open_rate"]
+    w30 = sub[sub["publish_date"] >= now - pd.Timedelta(days=30)]["open_rate"]
+    return {
+        "last_date": last["publish_date"], "last_open": float(last["open_rate"]),
+        "avg7": float(w7.mean()) if len(w7) else None,
+        "avg30": float(w30.mean()) if len(w30) else None,
+        "n7": int(len(w7)), "n30": int(len(w30)),
+    }
+
+
+def _or_block(container, title, w):
+    """Render Last send / 7-day / 30-day open-rate metrics for one flag, deltas vs last send."""
+    container.markdown(f"**{title}**")
+    m1, m2, m3 = container.columns(3)
+    if not w:
+        m1.metric("Last send", "—"); m2.metric("7-day avg", "—"); m3.metric("30-day avg", "—")
+        return
+    m1.metric("Last send", _pct(w["last_open"]), help=f"{w['last_date']:%b %d, %Y}")
+    d7 = None if w["avg7"] is None else w["avg7"] - w["last_open"]
+    d30 = None if w["avg30"] is None else w["avg30"] - w["last_open"]
+    m2.metric(f"7-day avg · {w['n7']} send{'' if w['n7'] == 1 else 's'}", _pct(w["avg7"]),
+              delta=None if d7 is None else f"{d7:+.1f} vs last", delta_color="off")
+    m3.metric(f"30-day avg · {w['n30']} send{'' if w['n30'] == 1 else 's'}", _pct(w["avg30"]),
+              delta=None if d30 is None else f"{d30:+.1f} vs last", delta_color="off")
+
+
+def _reg_tables(container, df_author):
+    """Top-5 converting (all-time) + last-5-by-date, both unpaid, side by side."""
+    unp = df_author[df_author["flag"] == "unpaid"]
+    cols = ["date", "title", "conversions", "open_rate"]
+    left, right = container.columns(2)
+    left.markdown("**Top 5 converting · unpaid, all-time**")
+    left.dataframe(unp.sort_values("conversions", ascending=False).head(5)[cols],
+                   use_container_width=True, hide_index=True)
+    right.markdown("**Last 5 unpaid · most recent**")
+    right.dataframe(unp.sort_values("publish_date", ascending=False).head(5)[cols],
+                    use_container_width=True, hide_index=True)
+
+
+def _combined_benchmark(container, reg):
+    """Four metrics: unpaid/paid × 7-day/30-day avg open rate across all three regulars."""
+    one_per_post = reg.drop_duplicates("post_id")  # a co-authored piece counts once
+    cols = container.columns(4)
+    specs = [("unpaid", "avg7", "n7", "Unpaid · 7-day"), ("unpaid", "avg30", "n30", "Unpaid · 30-day"),
+             ("paid", "avg7", "n7", "Paid · 7-day"), ("paid", "avg30", "n30", "Paid · 30-day")]
+    for col, (flag, win, ncol, label) in zip(cols, specs):
+        w = _windows(one_per_post, flag)
+        val = _pct(w[win]) if w else "—"
+        n = w[ncol] if w else 0
+        col.metric(label, val, help=f"{n} send{'' if n == 1 else 's'} across the 3 regulars")
 
 
 def _gate():
@@ -99,8 +166,9 @@ c4.metric("Avg open rate", f"{k.average_open_rate:.1f}%")
 c5.metric("Est. ARR", f"${arr:,.0f}")
 c6.metric("Posts", f"{int(nposts):,}")
 
-t1, t2, t3, t4, t5 = st.tabs(
-    ["📈 Lead growth", "💳 Paid growth", "⚖️ Paid vs Unpaid", "🌟 Contributors", "✍️ By author"]
+t1, t2, t3, t4, t5, t6 = st.tabs(
+    ["📈 Lead growth", "💳 Paid growth", "⚖️ Paid vs Unpaid", "🌟 Contributors", "✍️ By author",
+     "🏅 Regulars"]
 )
 
 # ---- 1. Lead growth (TOTAL leads, all-time) ------------------------------
@@ -277,3 +345,46 @@ with t5:
     disp = sub.copy()
     disp["date"] = disp["date"].dt.date
     st.dataframe(disp, use_container_width=True, hide_index=True)
+
+# ---- 6. Regulars: Emma, Chris, Annie -------------------------------------
+with t6:
+    st.subheader("Regulars — Emma, Chris, Annie")
+    st.caption("Unpaid tagging began 2026-05-13, so 'all-time' unpaid ≈ mid-May onward. "
+               "Open-rate windows are trailing calendar days from today (sends are ~weekly), "
+               "each benchmarked against that author's most recent send.")
+    reg = q("""
+        select a.name as author, p.id as post_id, p.publish_date, p.title,
+               case when bool_or(pt.tag_slug = 'unpaidemail') then 'unpaid'
+                    when bool_or(pt.tag_slug = 'paidemail')   then 'paid' else null end as flag,
+               max(ps.open_rate) as open_rate,
+               max(coalesce(ps.upgrades, 0)) as conversions,
+               max(ps.email_recipients) as recipients
+        from posts p
+        join post_authors pa on pa.post_id = p.id
+        join authors a on a.id = pa.author_id
+        left join post_tags pt on pt.post_id = p.id and pt.tag_slug in ('paidemail', 'unpaidemail')
+        left join post_stats_latest ps on ps.post_id = p.id
+        where a.name in ('Emma Orlow', 'Chris Crowley', 'Annie Armstrong')
+          and p.publish_date is not null
+        group by a.name, p.id, p.publish_date, p.title
+    """)
+    reg["publish_date"] = pd.to_datetime(reg["publish_date"], utc=True)
+    reg["date"] = reg["publish_date"].dt.date
+    reg["open_rate"] = pd.to_numeric(reg["open_rate"], errors="coerce").round(1)
+    reg["conversions"] = reg["conversions"].fillna(0).astype(int)
+
+    st.markdown("#### All three combined")
+    _combined_benchmark(st, reg)
+    st.divider()
+
+    for author in REG_ORDER:
+        da = reg[reg["author"] == author]
+        st.markdown(f"#### {author}")
+        if da.empty:
+            st.info("No posts found for this author."); st.divider(); continue
+        u, pd_col = st.columns(2)
+        _or_block(u, "Unpaid email", _windows(da, "unpaid"))
+        _or_block(pd_col, "Paid email", _windows(da, "paid"))
+        st.write("")
+        _reg_tables(st, da)
+        st.divider()
