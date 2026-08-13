@@ -74,25 +74,32 @@ class Beehiiv:
         ).get("data", [])
 
     def iter_subscriptions(self, pub_id: str, status: str | None = None, page_size: int = 100):
-        """Yield every subscriber, paginating fully (oldest first)."""
-        page = 1
+        """Yield every subscriber, paginating fully (oldest first).
+
+        Cursor-based: beehiiv forbids offset (`page`) pagination beyond page 100,
+        i.e. past 10k subscribers ("PAGINATION_LIMIT_EXCEEDED"). We follow the
+        `next_cursor` the API returns and stop when `has_more` is false.
+        """
+        cursor: str | None = None
         while True:
             params = [
                 ("limit", page_size),
-                ("page", page),
                 ("order_by", "created"),
                 ("direction", "asc"),
                 ("expand[]", "subscription_premium_tiers"),
             ]
             if status:
                 params.append(("status", status))
+            if cursor:
+                params.append(("cursor", cursor))
             data = self._get(f"/publications/{pub_id}/subscriptions", params=params)
             for sub in data.get("data", []):
                 yield sub
-            total_pages = data.get("total_pages") or 1
-            if page >= total_pages:
+            if not data.get("has_more"):
                 break
-            page += 1
+            cursor = data.get("next_cursor")
+            if not cursor:
+                break
 
     def iter_posts(self, pub_id: str, expand=None, status: str | None = None, page_size: int = 100):
         """Yield every post for a publication, paginating fully.
